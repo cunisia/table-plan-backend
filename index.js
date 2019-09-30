@@ -1,17 +1,44 @@
 import express from 'express';
 import bodyParser from 'body-parser';
-import ConstraintsTypes from './ConstraintsTypes';
+import {fs} from 'fs';
+import { exec } from 'child_process';
+import {ConstraintsTypes, ConstraintsPredicateLabel} from './ConstraintsTypes';
 
 const app = express();
 app.use(bodyParser.json());
 
 app.post('/compute-table-plan', (req, res) => {
     const {constraints, groupsList, guestsList, tablesList} = req.body;
-    const seatsPreducates = getSeatsPredicates(tablesList);
+    const importInstruction = ':-[./src/table_plan_ai].';
+    const tablesPredicates = getTablesPredicates(tablesList);
+    const seatsPredicates = getSeatsPredicates(tablesList);
     const getGuestIdsList = getGuestIdsListFactory(groupsList, guestsList);
     const constraintsPredicates = getConstraintsPredicates(constraints, getGuestIdsList);
+    const computeTablePlanInstruction = `:-seat_guests([
+                                        ${guestsList.map(guest => guest.id).reduce((acc, guestId)=> `${acc}, ${guestId}`)}
+                                        ], S), print_table_plan(S), halt.`
+    const file = [importInstruction, tablesPredicates, seatsPredicates, constraintsPredicates, computeTablePlanInstruction]
+        .reduce((acc, block) => `${acc}\n\n${block}`);
+    fs.writeFile('~/table-plan-ai/temp/toto.pl', file, (err) => {
+        if(err) {
+            throw(err);
+        }
+        exec('swipl -s ~/table-plan-ai/temp/toto.pl', (err, stdout, stderr) => {
+            if (err) {
+                throw(err);
+            }
+            res.send(stdout);
+        });
+
+    })
     res.send(`Hello ${name}`);
 });
+
+const getTablesPredicates = (tablesList) => {
+    return tablesList
+        .map(table => `table(${table.id}, ${table.seatWidth}).`)
+        .reduce((acc, predicate) => `${acc}\n${predicate}`);
+};
 
 const getSeatsPredicates = (tablesList) => {
     return tablesList
@@ -21,48 +48,32 @@ const getSeatsPredicates = (tablesList) => {
                     .map((v, i) => `seat(${tableId}, ${i}).`)
                     .reduce((acc, predicate) => `${acc}\n${predicate}`);
         })
-        .reduce((acc, predicates) => (acc, predicate) => `${acc}\n\n${predicates}`);
+        .reduce((acc, predicates) => `${acc}\n\n${predicates}`);
 };
 
 const getConstraintsPredicates = (constraints, getGuestIdsList) => {
     return constraints
-        .map(getConstraintPredicate(constraint, getGuestIdsList))
+        .map(constraint => getConstraintPredicate(constraint, getGuestIdsList))
         .reduce((acc, predicate) => `${acc}\n${predicate}`);
 }
 
 const getConstraintPredicate = (constraint, getGuestIdsList) => {
-    const {type} = constraint;
+    const {type, affirmative, guestsIdList, groupsIdList} = constraint;
+    const guestIdsList = getGuestIdsList(guestsIdList, groupsIdList);
+    const predicateName = ConstraintsPredicateLabel[type] ? ConstraintsPredicateLabel[type][affirmative] : undefined;
+    if (predicateName === undefined) {
+        throw new Error(`Cannot find predicate name for constraint type: ${type}`);
+    }
     switch(type) {
         case(ConstraintsTypes.BE_NEXT_TO):
-            return getBeNextToConstraint(constraint, getGuestIdsList);
         case(ConstraintsTypes.HAVE_EXCLUSIVE_TABLE):
-            return getHaveExclusiveTableConstraint(constraint, getGuestIdsList);
         case(ConstraintsTypes.SEAT_AT_SAME_TABLE):
-            return getSeatAtSameTableConstraint(constraint, getGuestIdsList);
+            return `${predicateName}([${guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`)}]).`;
         case(ConstraintsTypes.SEAT_AT_SPECIFIC_TABLE):
-            return getSeatAtSpecificTableConstraint(constraint, getGuestIdsList);
+            return `${predicateName}([${guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`)}], ${tablesIdList[0]}).`;
         default:
             throw new Error(`Unknown constraint type: ${type}`);
     }
-}
-
-const getBeNextToConstraint = (constraint, getGuestIdsList) => {
-    const {affirmative, guestsIdList, groupsIdList} = constraint;
-    const predicateName = affirmative ? 'next_to' : 'not_next_to';
-    const guestIdsList = getGuestIdsList(guestsIdList, groupsIdList);
-    return `${predicateName}(${guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`)})`;
-}
-
-const getHaveExclusiveTableConstraint = (constraint, getGuestIdsList) => {
-
-};
-
-const getSeatAtSameTableConstraint = (constraint, getGuestIdsList) => {
-
-};
-
-const getSeatAtSpecificTableConstraint = (constraint, getGuestIdsList) => {
-
 };
 
 const getGuestIdsListFactory = (groupsList, guestsList) => {
@@ -83,6 +94,6 @@ const getGuestIdsListFactory = (groupsList, guestsList) => {
     }
 
     return getGuestIdsList;
-}
+};
 
 app.listen(8080);
