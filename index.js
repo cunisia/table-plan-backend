@@ -1,42 +1,68 @@
-import express from 'express';
-import bodyParser from 'body-parser';
-import {fs} from 'fs';
-import { exec } from 'child_process';
-import {ConstraintsTypes, ConstraintsPredicateLabel} from './ConstraintsTypes';
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const fs = require('fs');
+const {exec}= require('child_process');
 
 const app = express();
+
+app.use(cors()); //TODO: /!\ for tests purposes only requests from any origin are accepted, to change later
 app.use(bodyParser.json());
 
-app.post('/compute-table-plan', (req, res) => {
-    const {constraints, groupsList, guestsList, tablesList} = req.body;
-    const importInstruction = ':-[./src/table_plan_ai].';
+const ROOT = '/Users/pierrecuni/table-plan-ai/temp/';
+
+app.post('/generate-plan', (req, res) => {
+    const {constraints: constraintsWrapper, groupsList, guestsList, tablesList} = req.body;
+    const {list: constraints} = constraintsWrapper;
+    const file = getPredicatesFile(constraints, groupsList, guestsList, tablesList);
+    const fileName = `${new Date().getTime()}.pl`;
+    const filePath = `${ROOT}${fileName}`;
+    const maybeCreateRootPromise = fs.promises.access(ROOT)
+        .then(
+            function(){},
+            () => fs.promises.mkdir(ROOT, { recursive: true })
+        );
+    maybeCreateRootPromise
+        .then(() => fs.promises.writeFile(filePath, file))
+        .then(
+            () => {
+                const child = exec(`swipl -s ${filePath} >&1`, (err, stdOut, stdErr) => {
+                    if (err) {
+                        throw new Error(`Error while executing swipl \n${file}`, err);
+                    }
+                    console.log(file);
+                    console.log('out: ',stdOut);
+                    res.send(stdOut);
+                });
+            },
+            err => {
+                throw new Error(`Cannot write file ${fileName}`, err);
+            }
+        )
+});
+
+const promiseFromChildProcess = (child) => {
+    return new Promise(function (resolve, reject) {
+        child.addListener("error", reject);
+        child.addListener("exit", resolve);
+    });
+}
+
+const getPredicatesFile = (constraints, groupsList, guestsList, tablesList) => {
+    const importInstruction = ':-["../src/table_plan_ai"].';
     const tablesPredicates = getTablesPredicates(tablesList);
     const seatsPredicates = getSeatsPredicates(tablesList);
     const getGuestIdsList = getGuestIdsListFactory(groupsList, guestsList);
     const constraintsPredicates = getConstraintsPredicates(constraints, getGuestIdsList);
-    const computeTablePlanInstruction = `:-seat_guests([
-                                        ${guestsList.map(guest => guest.id).reduce((acc, guestId)=> `${acc}, ${guestId}`)}
-                                        ], S), print_table_plan(S), halt.`
+    const computeTablePlanInstruction = `:-seat_guests([${guestsList.reduce((acc, guest) => `${acc}, ${guest.id}`, guestsList[0].id)}], S), print_table_plan(S).\n:-halt.`
     const file = [importInstruction, tablesPredicates, seatsPredicates, constraintsPredicates, computeTablePlanInstruction]
         .reduce((acc, block) => `${acc}\n\n${block}`);
-    fs.writeFile('~/table-plan-ai/temp/toto.pl', file, (err) => {
-        if(err) {
-            throw(err);
-        }
-        exec('swipl -s ~/table-plan-ai/temp/toto.pl', (err, stdout, stderr) => {
-            if (err) {
-                throw(err);
-            }
-            res.send(stdout);
-        });
-
-    })
-    res.send(`Hello ${name}`);
-});
+    return file;
+}
 
 const getTablesPredicates = (tablesList) => {
     return tablesList
-        .map(table => `table(${table.id}, ${table.seatWidth}).`)
+        .map(table => `table(${table.id}, ${table.seatsWidth}).`)
         .reduce((acc, predicate) => `${acc}\n${predicate}`);
 };
 
@@ -44,56 +70,97 @@ const getSeatsPredicates = (tablesList) => {
     return tablesList
         .map(table => {
             const {id:tableId, seatsWidth: nbSeats} = table;
-            return Array(nbSeats)
-                    .map((v, i) => `seat(${tableId}, ${i}).`)
+            return [...Array(parseInt(nbSeats)).keys()]
+                    .map(v => `seat(${tableId}, ${v}).`)
                     .reduce((acc, predicate) => `${acc}\n${predicate}`);
         })
         .reduce((acc, predicates) => `${acc}\n\n${predicates}`);
 };
 
 const getConstraintsPredicates = (constraints, getGuestIdsList) => {
-    return constraints
+    const constraintsWithDefaults = getConstraintsWithDefault(constraints);
+    const contraintsByTypeWithDefaults = getConstraintsByType(constraintsWithDefaults);
+    return contraintsByTypeWithDefaults
         .map(constraint => getConstraintPredicate(constraint, getGuestIdsList))
         .reduce((acc, predicate) => `${acc}\n${predicate}`);
 }
 
+const getDefaultConstraint = (type, affirmative) => {return {type, guestsIdList: [], groupsIdList: [], tablesIdList: [], affirmative}};
+
+const getConstraintsWithDefault = (constraints) => {
+    return Object.keys(ConstraintsTypes)
+        .map(type => [getDefaultConstraint(type, true), getDefaultConstraint(type, false)])
+        .reduce((acc, defaultsConstraints) => acc.concat(defaultsConstraints), constraints);
+}
+
+const getConstraintsByType = (constraints) => {
+    return Object.keys(ConstraintsTypes)
+        .map(type => {
+            const posConstOfType = constraints.filter(constraint => constraint.type === type && constraint.affirmative);
+            const negConstOfType = constraints.filter(constraint => constraint.type === type && !constraint.affirmative);
+            return posConstOfType.concat(negConstOfType);
+        })
+        .reduce((acc, constraints) => acc.concat(constraints));
+}
+
 const getConstraintPredicate = (constraint, getGuestIdsList) => {
-    const {type, affirmative, guestsIdList, groupsIdList} = constraint;
+    const {type, affirmative, guestsIdList, groupsIdList, tablesIdList} = constraint;
     const guestIdsList = getGuestIdsList(guestsIdList, groupsIdList);
+    const strGuestIdsList = guestIdsList.length > 0 ? guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`) : '';
     const predicateName = ConstraintsPredicateLabel[type] ? ConstraintsPredicateLabel[type][affirmative] : undefined;
     if (predicateName === undefined) {
-        throw new Error(`Cannot find predicate name for constraint type: ${type}`);
+        console.warn(`Cannot find predicate name for constraint type: ${type}`);
+        return '';
     }
     switch(type) {
         case(ConstraintsTypes.BE_NEXT_TO):
         case(ConstraintsTypes.HAVE_EXCLUSIVE_TABLE):
         case(ConstraintsTypes.SEAT_AT_SAME_TABLE):
-            return `${predicateName}([${guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`)}]).`;
+            return `${predicateName}([${strGuestIdsList}]).`;
         case(ConstraintsTypes.SEAT_AT_SPECIFIC_TABLE):
-            return `${predicateName}([${guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`)}], ${tablesIdList[0]}).`;
+            const tableId = tablesIdList.length > 0 ? tablesIdList[0] : 'nil';
+            return `${predicateName}([${strGuestIdsList}], ${tableId}).`;
         default:
-            throw new Error(`Unknown constraint type: ${type}`);
+            console.warb(`Unknown constraint type: ${type}`);
+            return '';
     }
 };
 
 const getGuestIdsListFactory = (groupsList, guestsList) => {
     const groupToGuestsMap = groupsList.reduce((map, group) => {
-        const {groupId} = group;
-        map[groupId].guestIdsList = guestsList
+        const {id:groupId} = group;
+        const guestIdsList = guestsList
             .filter(guest => guest.groupId === groupId)
             .map(guest => guest.id);
+        map[groupId] = guestIdsList;
         return map;
-    });
+    }, {});
 
     const getGuestIdsList = (guestsIdsList, groupsIdsList) => {
         const arr =  groupsIdsList
-            .map(groupId => groupToGuestsMap[groupId].guestIdsList)
-            .reduce((acc, guestIdsList) => acc.concat(guestIdsList))
+            .map(groupId => groupToGuestsMap[groupId])
+            .reduce((acc, guestIdsList) => acc.concat(guestIdsList), [])
             .concat(guestsIdsList);
         return [...new Set(arr)];
     }
 
     return getGuestIdsList;
+};
+
+const ConstraintsTypes = {
+    BE_NEXT_TO: "BE_NEXT_TO",
+    SEAT_AT_SAME_TABLE: "SEAT_AT_SAME_TABLE",
+    SEAT_AT_SPECIFIC_TABLE: "SEAT_AT_SPECIFIC_TABLE",
+    HAVE_EXCLUSIVE_TABLE: "HAVE_EXCLUSIVE_TABLE",
+    HAVE_GROUP_EXCLUSIVE_TABLE: "HAVE_GROUP_EXCLUSIVE_TABLE"
+};
+
+const ConstraintsPredicateLabel = {
+    BE_NEXT_TO: {true: "next_to", false:"not_next_to"},
+    SEAT_AT_SAME_TABLE: {true:"same_table", false:"different_table"},
+    SEAT_AT_SPECIFIC_TABLE: {true:"specific_table"},
+    HAVE_EXCLUSIVE_TABLE: {true:"exclusive_table"},
+    HAVE_GROUP_EXCLUSIVE_TABLE: {}
 };
 
 app.listen(8080);
