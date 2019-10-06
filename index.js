@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const fs = require('fs');
-const {exec}= require('child_process');
+const {execFile}= require('child_process');
 
 const app = express();
 
@@ -23,15 +23,15 @@ app.post('/generate-plan', (req, res) => {
             () => fs.promises.mkdir(ROOT, { recursive: true })
         );
     maybeCreateRootPromise
-        .then(() => fs.promises.writeFile(filePath, file))
+        .then(() => fs.promises.writeFile(filePath, file, {
+            mode: 0o755
+        }))
         .then(
             () => {
-                const child = exec(`swipl -s ${filePath} >&1`, (err, stdOut, stdErr) => {
+                const child = execFile(`${filePath}`, (err, stdOut, stdErr) => {
                     if (err) {
                         throw new Error(`Error while executing swipl \n${file}`, err);
                     }
-                    console.log(file);
-                    console.log('out: ',stdOut);
                     res.send(stdOut);
                 });
             },
@@ -49,13 +49,15 @@ const promiseFromChildProcess = (child) => {
 }
 
 const getPredicatesFile = (constraints, groupsList, guestsList, tablesList) => {
+    const execFileMarker = '#!/usr/bin/env swipl';
     const importInstruction = ':-["../src/table_plan_ai"].';
     const tablesPredicates = getTablesPredicates(tablesList);
     const seatsPredicates = getSeatsPredicates(tablesList);
     const getGuestIdsList = getGuestIdsListFactory(groupsList, guestsList);
     const constraintsPredicates = getConstraintsPredicates(constraints, getGuestIdsList);
-    const computeTablePlanInstruction = `:-seat_guests([${guestsList.reduce((acc, guest) => `${acc}, ${guest.id}`, guestsList[0].id)}], S), print_table_plan(S).\n:-halt.`
-    const file = [importInstruction, tablesPredicates, seatsPredicates, constraintsPredicates, computeTablePlanInstruction]
+    const initialize = ':- initialization(main, main).';
+    const main = `main(_):-seat_guests([${guestsList.reduce((acc, guest) => `${acc}, ${guest.id}`, guestsList[0].id)}], TP), get_json_table_plan(TP, JSON), write(JSON).`
+    const file = [execFileMarker, importInstruction, tablesPredicates, seatsPredicates, constraintsPredicates, initialize, main]
         .reduce((acc, block) => `${acc}\n\n${block}`);
     return file;
 }
@@ -109,7 +111,7 @@ const getConstraintPredicate = (constraint, getGuestIdsList) => {
     const strGuestIdsList = guestIdsList.length > 0 ? guestIdsList.reduce((acc, guestId)=> `${acc}, ${guestId}`) : '';
     const predicateName = ConstraintsPredicateLabel[type] ? ConstraintsPredicateLabel[type][affirmative] : undefined;
     if (predicateName === undefined) {
-        console.warn(`Cannot find predicate name for constraint type: ${type}`);
+        console.warn(`Cannot find predicate name for constraint type: ${type} and affirmative value: ${affirmative}`);
         return '';
     }
     switch(type) {
