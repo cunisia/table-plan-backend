@@ -1,0 +1,1 @@
+module.exports.ROOT = '/Users/pierrecuni/table-plan-ai/temp/';

@@ -14,5 +14,5 @@ const ConstraintsPredicateLabel = {
     HAVE_GROUP_EXCLUSIVE_TABLE: {}
 };
 
-module.export.ConstraintsTypes = ConstraintsTypes;
-module.export.ConstraintsPredicateLabel = ConstraintsPredicateLabel;
+module.exports.ConstraintsTypes = ConstraintsTypes;
+module.exports.ConstraintsPredicateLabel = ConstraintsPredicateLabel;
